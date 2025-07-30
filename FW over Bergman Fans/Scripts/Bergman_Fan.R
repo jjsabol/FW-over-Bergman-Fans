@@ -1,22 +1,14 @@
 source("Scripts/Functions.R")
 
-# Define M via a list of bases.
-EL <- matrix(c(1,2, 2,3, 3,4, 4,1, 1,5, 4,5, 3,6, 4,6), 8, 2, byrow=TRUE)
-G <- igraph::graph_from_edgelist(EL, directed=FALSE)
-plot(G, edge.label = if (is.null(E(G)$name)) as_ids(E(G)) else E(G)$name)
-B_list <- enumerate_sp_trees(G)
-# Do you want to use max-plus instead of default (min-plus)?
-max_plus <- TRUE
-
-#### Compute all M Information ####
-
-if (TRUE){
+matroid_info <- function(B_list, max_plus=TRUE, verbose=FALSE){
   E_set <- sort(unique(unlist(B_list))) # Ground set.
   B_matrix <- do.call(rbind, lapply(B_list, char_vect, E=E_set))
   F_matrix <- proper_flats(B_matrix)
   # Cyclic Bergman Fan, Bergman Fan, and Cycles.
-  CBF <- cyclic_Bergman(B_list, silent = FALSE)
-  K_Cycl <- lapply(CBF$W, rbind) # Maintains matrix structure in case cones is 1-D
+  CBF <- cyclic_Bergman(B_list, silent = TRUE)
+  CF_BF <- CBF$BF_map # Mapping from Cyclic to Bergman.
+  BF_CF <- lapply(unique(CF_BF), function(x) which(CF_BF == x)) # Bergman to Cyclic.
+  K_Cycl <- lapply(CBF$W, rbind) # Maintains matrix structure in case cone is 1-D
   C_matrix <- do.call(rbind, lapply(CBF$circuits, char_vect, E=E_set))
   F_df <- flat_data(F_matrix, B_matrix, C_matrix)
   # Connected flats for a minimal building set (G_min)
@@ -25,6 +17,7 @@ if (TRUE){
   # Build the set of maximal cones in the Bergman/Nested Set Fans.
   K_Berg <- list()
   K_Nest <- list()
+  NS_BF <- c() # Mapping from Nested to Bergman
   i <- 0
   for (partition in CBF$BF_cones){ # For each cone in the Bergman Fan.
     i <- i + 1
@@ -52,43 +45,80 @@ if (TRUE){
         }
       }
     }
-    if (length(big_pi) == r-1) { K_Nest[[length(K_Nest)+1]] <- BF_cone
+    if (length(big_pi) == r-1) { 
+      K_Nest[[length(K_Nest)+1]] <- BF_cone
+      NS_BF <- c(NS_BF, i)
     } else {
       F_pi <- Rays_NS[big_pi,]
       max_nested <- max_nested_sets(F_pi, G_min)
       for (set in max_nested) {
         K_Nest[[length(K_Nest)+1]] <- F_pi[set,]
+        NS_BF <- c(NS_BF, i)
       }
     }
   }
+  BF_NS <- lapply(unique(NS_BF), function(x) which(NS_BF == x)) # Bergman to Nested
   names(K_Berg) <- CBF$BF_cones
-  print(paste0("Cyclic Cones: ", length(K_Cycl), "; Nested Set Cones: ", length(K_Nest),
+  if (verbose) print(paste0("Cyclic Cones: ", length(K_Cycl), "; Nested Set Cones: ", length(K_Nest),
     "; Bergman Cones: ", length(K_Berg)))
+  if (max_plus){
+    # Convert cones to Max-Plus
+    K_BF <- lapply(K_Berg, function(W) -W)
+    K_NS <- lapply(K_Nest, function(W) -W)
+    K_CF <- lapply(K_Cycl, function(W) -W)
+    V_matrix <- log(1-F_matrix)
+  } else {
+    K_BF <- K_Berg
+    K_NS <- K_Nest
+    K_CF <- K_Cycl
+    V_matrix <- -log(1-F_matrix)
+  }
+  cone_codes <- sapply(K_NS, topological_profile, C_matrix=C_matrix)
+  pre_images_K <- lapply(K_NS, pre_K)
+  H_NS <- purrr::flatten(pre_images_K) # List of pre-image H-Reps
+  H_K <- rep(1:length(K_NS), times = sapply(pre_images_K, length)) # Map the H-rep to the NS cone K.
+  return(list(E_set=E_set, B_matrix=B_matrix, C_matrix=C_matrix, 
+    F_matrix=F_matrix, V_matrix=V_matrix, F_df=F_df,  # Flat data
+    K_BF=K_BF, K_NS=K_NS, K_CF=K_CF, cone_codes=cone_codes,  # Cones
+    CF_BF=CF_BF, BF_CF=BF_CF, NS_BF=NS_BF, BF_NS=BF_NS, H_K=H_K, H_NS=H_NS)) # Mappings
 }
-if (max_plus){
-  # Convert cones to Max-Plus
-  K_BF <- lapply(K_Berg, function(W) -W)
-  K_NS <- lapply(K_Nest, function(W) -W)
-  K_CF <- lapply(K_Cycl, function(W) -W)
-  V_matrix <- log(1-F_matrix)
-} else {
-  K_BF <- K_Berg
-  K_NS <- K_Nest
-  K_CF <- K_Cycl
-  V_matrix <- -log(1-F_matrix)
-}
 
-#### Mappings between Cones ####
+# Define M via a list of bases (Running Example)
+EL <- matrix(c(1,2, 2,3, 3,4, 4,1, 1,5, 4,5, 3,6, 4,6), 8, 2, byrow=TRUE)
+G <- igraph::graph_from_edgelist(EL, directed=FALSE)
+plot(G, edge.label = if (is.null(E(G)$name)) as_ids(E(G)) else E(G)$name)
+B_list <- enumerate_sp_trees(G)
 
-# One-to-Many (will be lists)
-BF_CF <- sapply(K_BF, function(w) which_cone(colmeans(w), K_CF))
-BF_NS <- sapply(K_BF, function(w) which_cone(colmeans(w), K_NS))
-NS_CF <- sapply(K_NS, function(w) which_cone(colmeans(w), K_CF))
+M <- matroid_info(B_list, max_plus = TRUE, verbose=TRUE)
 
-# Many-to-One (should be vectors)
-NS_BF <- sapply(K_NS, function(w) which_cone(colmeans(w), K_BF))
-CF_BF <- sapply(K_CF, function(w) which_cone(colmeans(w), K_BF))
-CF_NS <- sapply(K_CF, function(w) which_cone(colmeans(w), K_NS))
+E_set <- M$E_set
+B_matrix <- M$B_matrix
+C_matrix <- M$C_matrix
+F_matrix <- M$F_matrix
+V_matrix <- M$V_matrix
+F_df <- M$F_df
+K_BF <- M$K_BF
+K_NS <- M$K_N
+K_CF <- M$K_CF
+cone_codes <- M$cone_codes
+CF_BF <- M$CF_BF
+BF_CF <- M$BF_CF
+NS_BF <- M$NS_BF
+BF_NS <- M$BF_NS
+H_K <- M$H_K
+H_NS <- M$H_NS
+
+#### Computation Checks (optional testing) ####
+
+# The ones we didn't already map (which_cone is somewhat slow...)
+CF_NS <- sapply(K_CF, function(w) which_cone(colmeans(w), K_NS)) # Cyclic to Nested
+NS_CF <- lapply(unique(CF_NS), function(x) which(CF_NS == x)) # Nested to Cyclic
+
+# Alternative way to check the mappings calculated by matroid_info.
+NS_BF2 <- sapply(K_NS, function(w) which_cone(colmeans(w), K_BF))
+CF_BF2 <- sapply(K_CF, function(w) which_cone(colmeans(w), K_BF))
+if (any(sapply(seq(length(NS_BF)), function(i) all(NS_BF[[i]] != NS_BF2[[i]])))) print("Bad NS_BF Map")
+if (any(sapply(seq(length(CF_BF)), function(i) all(CF_BF[[i]] != CF_BF2[[i]])))) print("Bad CF_BF Map")
 
 # Any not get mapped? (checks)
 if(any(sapply(BF_CF, length) == 0)) print("Bad BF_CF Mapping")
@@ -98,21 +128,21 @@ if(any(sapply(NS_CF, length) == 0)) print("Bad NS_CF Mapping")
 if(any(sapply(CF_BF, length) == 0)) print("Bad CF_BF Mapping")
 if(any(sapply(CF_NS, length) == 0)) print("Bad CF_NS Mapping")
 
-# Mapping maximal cones to topological codes.
-cone_codes <- sapply(K_NS, topological_profile, C_matrix=C_matrix)
+# Check uniqueness of topological codes.
 if(any(duplicated(cone_codes))) print("DUPLICATED CONE CODES")
 # Note: Only performs for relative interior of max cones, not boundary points.
 
-# Pre-Image H-spaces associated to each NESTED SET CONE.
-pre_images_K <- lapply(K_NS, pre_K)
-H_K <- rep(1:length(K_NS), times = sapply(pre_images_K, length))
-H_NS <- purrr::flatten(pre_images_K)
+# Check that relative interior of preimage cones map to unique maximal K.
+if (any(sapply(H_NS, function(H) {
+  which_cone(colmeans(rcdd::scdd(cbind(0,0,H))$output[,-(1:2)]), K_NS)}
+  ) != H_K)) print("Bad H_K Mapping")
 
 #### Save M Info ####
 
-fn <- paste0("Data/Matroid_Info.rda")
+fn <- paste0("Data/M(Running)_Info.rda")
 save(E_set, B_matrix, C_matrix, F_matrix, V_matrix, F_df, K_BF, K_NS, K_CF,
-  BF_NS, BF_CF, NS_BF, NS_CF, CF_BF, CF_NS, cone_codes, H_K, H_NS, file = fn)
+  BF_NS, BF_CF, NS_BF, NS_CF, CF_BF, CF_NS, cone_codes, H_K, H_NS, 
+  file = fn)
 
 #### Additional Examples for Specifying M ####
 
@@ -138,7 +168,7 @@ G <- igraph::graph_from_data_frame(d = data.frame(from = c(4,2,3,3,2,1),
 G <- igraph::graph_from_data_frame(d = data.frame(from = c(1,1,1,2,3,4), 
   to = c(2,4,3,3,4,5), name = seq(6)), directed = FALSE, vertices = seq(5))
 # More generic graphs.
-G <- igraph::make_full_graph(4)
+G <- igraph::make_full_graph(5)
 G <- igraph::make_ring(5)
 # Random Graphs.
 num_nodes <- 5; num_edges <- 7
@@ -165,7 +195,7 @@ B_list <- reverse_search(A)
 
 
 # UNIFORM MATROIDS
-n <- 4; r <- 2
+n <- 5; r <- 2
 n_combo <- RcppAlgos::comboGeneral(seq_len(n), r)
 B_list <- split(n_combo, seq_len(nrow(n_combo)))
 # Or alternatively...

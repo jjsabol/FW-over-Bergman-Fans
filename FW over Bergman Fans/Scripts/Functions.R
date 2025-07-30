@@ -92,6 +92,7 @@ norm.i <- function(X, i=0, center=FALSE, diag=FALSE){
 # Cone Inclusion
 # Sample from the relative interior of a cone.
 sample_cone <- function(K, ray_weights=NULL, unit_len=TRUE){
+  if ("numeric" %in% class(K)) K <- matrix(K, nrow=1)
   r <- nrow(K)
   if (is.null(ray_weights)) { alpha <- rep(1, r) # Uniform weighting.
   } else if (length(ray_weights) == r) { alpha <- ray_weights
@@ -155,6 +156,7 @@ in_Hspace <- function(x, K) all(K %*% x %>=% 0)
 which_Hspace <- function(x, K_set) which(sapply(K_set, function(K) in_Hspace(x,K)))
 # Compute the pre-image (under tropical projection) of maximal cone K
 pre_K <- function(K){
+  if ("numeric" %in% class(K)) K <- matrix(K, nrow=1)
   E <- seq(ncol(K))
   M <- list()
   rep_j <- c(1)
@@ -433,12 +435,20 @@ cyclic_Bergman <- function(B_list, silent=FALSE){
     BF_map <<- c(BF_map, associated_cone)
     # END OPTIONAL.
     edgelist <- lapply(seq_len(length(L)-1), function(i) L[i:(i+1)])
+    #print(p)
+    #print(L)
+    #print(F_nB)
+    #print(nB)
     for (cc in B[B %notin% p]){
       b <- c()
       for (k in nB) if (any(cc == F_nB[[k]])) b <- c(b, p[k])
+      #print(paste0(cc, "-", b))
       if (length(b) > 1) b <- b[which.max(match(b, L))]
       edgelist[[length(edgelist)+1]] <- c(b, cc)
     }
+    #print(edgelist)
+    #print(Qb)
+    #stop()
     edgelist <- matrix(unlist(edgelist), ncol = 2, byrow = TRUE)
     Tb <- igraph::graph_from_edgelist(el = edgelist)
     Tb <- delete_vertices(Tb, V(Tb)[igraph::degree(Tb)==0])
@@ -851,6 +861,89 @@ tr.sumDist <- function(V, x, symmetric=TRUE, to.x=TRUE){
     return(sum(Rfast::rowsums(vx) - n*Rfast::rowMins(vx,value=TRUE)))
   }
 }
+# Finds a single (or all) FW point(s).
+tr.fw.lp <- function(V, to_x = NULL, solver = "lpSolve", full_set = FALSE){
+  if (is.null(to_x)) {
+    to_x <- FALSE
+    t <- c(0,1)
+  } else t <- to_x*2 - 1
+  n <- nrow(V)
+  d <- ncol(V)
+  m <- length(t)
+  VD <- data.table(i = as.vector(row(V)), j = as.vector(col(V)), v_ij = as.vector(V))
+  setorder(VD, i, j)
+  
+  DC <- data.table::CJ(a = c(-1,1), k = seq(m)-1, i = seq(n), j = seq(d))
+  DC[, `:=` (i = i + k*n, j = j + n*m)]
+  DC[, `:=` (r = rep(seq(n*d*m), 2), c = i)]
+  DC[a == -1, c := j]
+  DC[k == 1, a := -a]
+  if (to_x) DC[, a := -a]
+  
+  A_mat <- Matrix::sparseMatrix(i = DC$r, j = DC$c, x = DC$a)
+  if (m > 1){
+    b_vec <- c(-VD$v_ij, VD$v_ij)
+    c_vec <- c(rep(1,n), rep(-1,n), rep(0,d))
+  } else {
+    b_vec <- t*VD$v_ij
+    c_vec <- c(rep(-t*d,n), rep(t*n,d))
+  }
+  c_dir <- c(rep(">=", n*d*m))
+  if (solver == "lpSolve") {
+    LP <- lp(direction = "min", objective.in = c_vec, const.dir = c_dir,
+      const.rhs = b_vec, compute.sens = TRUE,
+      dense.const = Rfast::data.frame.to_matrix(DC[,c("r","c","a")]))
+    d0 <- LP$objval - t[1]*sum(V)
+    rho <- head(LP$duals, length(b_vec))
+  } else if (solver == "Rglpk") {
+    lb <- list(lower = list(ind = seq(m*n), val = rep(-Inf,m*n)))
+    LP <- Rglpk_solve_LP(obj = c_vec, mat = A_mat, dir = c_dir, rhs = b_vec, bounds = lb)
+    d0 <- LP$optimum - t[1]*sum(V)
+    rho <- LP$auxiliary$dual
+  }
+  x0 <- tail(LP$solution, d)
+  if (!full_set) { 
+    return(list(x0 = x0, d0 = d0))
+  } else if (m == 2 | pracma::gcd(n,d) > 1){
+    library(RcppAlgos)
+    SEC <- data.table(jj = seq(choose(d,2)), RcppAlgos::comboGeneral(d, 2))
+    DC2 <- data.table::CJ(a = c(-1,0,1), k = c(0,1), i = seq(n), jj = seq(choose(d,2)))
+    DC2[SEC, on = list(jj), `:=` (j1 = i.V1, j2 = i.V2)]
+    DC2[k == 1, `:=` (j1 = j2, j2 = j1)]
+    DC2[VD, on = list(i,j1=j), v_ij := i.v_ij]
+    DC2[VD, on = list(i,j2=j), v_ik := i.v_ij]
+    DC2[, `:=` (b = v_ij - v_ik, r = rep(seq(n*(d-1)*d), 3), c = i)]
+    DC2[a == 1, c := j1 + n]
+    DC2[a == -1, c := j2 + n]
+    
+    DC3 <- dcast(DC, r + i + j ~ c, value.var = "a", fill=0)[rho %>>% 0]
+    DC3[, `:=` (k = as.numeric(i > n), jj = j-m*n)]
+    DC3[k == 1, i := i-n]
+    
+    DC2[DC3[k==0], on = list(i,j1=jj), keep1 := TRUE]
+    DC2[DC3[k==1], on = list(i,j2=jj), keep2 := TRUE]
+    DC4 <- subset(DC2, keep1 == TRUE | keep2 == TRUE)
+    DC4[a == 0, a := 1]
+    
+    A2_mat <- Matrix::sparseMatrix(i = DC4$r, j = DC4$c, x = DC4$a)[unique(DC4$r),]
+    b2_vec <- DC4[a == -1]$b
+    if (to_x) { 
+      A2_mat <- -A2_mat
+      b2_vec <- -b2_vec
+    }
+    FW.hrep <- makeH(a1=as.matrix(-A2_mat[,(n+1):(n+d)]), b1=-b2_vec)
+    FW.rdnd <- redundant(FW.hrep)
+    FW.scdd <- tryCatch(scdd(FW.rdnd$output)$output, error = function(e) NULL)
+    if (is.null(FW.scdd)) return(NULL)
+    FW.set <- FW.scdd[which(FW.scdd[,1] == 0),-(1:2), drop = FALSE]
+    if (nrow(FW.set) <= 0) return(NULL)
+    FW.set <- FW.set - rep_col(FW.set[,1], ncol(FW.set))
+    barycenter <- as.numeric(Rfast::colmeans(FW.set))
+    return(list(x0 = barycenter, d0 = d0, FW.set = FW.set))
+  } else {
+    return(list(x0 = x0, d0 = d0, FW.set = data.table(t(x0))))
+  }
+}
 # Solves the symmetric FW problem via min-cost flow LP.
 tr.fw.mcf <- function(V){
   n <- nrow(V)
@@ -879,7 +972,9 @@ tr.fw.mcf <- function(V){
   x_d <- which(V(G_x)$name %in% as.character(seq(2,d)))
   x_N <- which(V(G_x)$name %in% as.character(seq(d)))
   K_star <- tryCatch(igraph::distances(G_x, v = x_N, to = x_N, mode = "out"), error = function(e) NULL)
-  if (is.null(K_star)) { warning("Degenerate LP solution.")
+  if (is.null(K_star)) { 
+    warning("Degenerate LP solution.")
+    return(NULL)
   } else {
     K_star <- K_star[order(as.integer(colnames(K_star))), order(as.integer(colnames(K_star)))]
     if (!all(apply(K_star, 1, function(x) tr.sumDist(V, x)) %<=% d0)) stop("BAD KSTAR")

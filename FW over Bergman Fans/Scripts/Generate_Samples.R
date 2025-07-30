@@ -1,37 +1,31 @@
 #### Loading and Functions ####
 
 source("Scripts/Functions.R")
-load("Data/Matroid_Info.rda")
-boundary_cases <- list()
+load("Data/M(Running)_Info.rda")
 
-# Function for Algorithm 1.
-S_int_K <- function(x0, k0, n, dispersion=3){
-  K <- K_NS[[k0]]
-  X0 <- Rfast::rep_row(x0, n)
-  w_min_x0 <- w_min_C(x0, C_matrix)
+# Function to Generate Sample from M-Ultrametric Space
+Generate.Sample.from.U_M <- function(v0, K, n, sigma_s=3, in_U=FALSE){
+  V0 <- Rfast::rep_row(v0, n)
+  w_min_v0 <- w_min_C(v0, C_matrix)
   # Generate and apply noise.
-  Z <- matrix(rnorm(length(X0), mean=0, sd=dispersion*w_min_x0), nrow=n)
-  S <- round(X0 + Z, 6) # Rounding helps avoid issues with FW computations.
+  Z <- matrix(rnorm(length(V0), mean=0, sd=sigma_s*w_min_v0), nrow=n)
+  S <- V0 + Z
   # Project the points back into U.
-  SU <- t(apply(S, 1, function(x) proj.tconv(x, V_matrix)))
+  if (in_U) { SU <- t(apply(S, 1, function(x) proj.tconv(x, V_matrix)))
+  } else SU <- S
   if (any(!(apply(SU, 1, is_M_ultrametric, C_matrix=C_matrix)))) stop("BAD PROJECTION")
   # Compute maximal w_min for any x in the intersection of FW(SU) with K.
-  x_opt <- max_w_min(K, SU, C_matrix)
-  while (is.null(x_opt)) {
-    Z <- matrix(rnorm(length(X0), mean=0, sd=dispersion*w_min_x0), nrow=n)
-    S <- round(X0 + Z, 6) # Rounding helps avoid issues with FW computations.
+  w <- max_w_min(K, SU, C_matrix)
+  while (is.null(w)) {
+    Z <- matrix(rnorm(length(V0), mean=0, sd=sigma_s*w_min_v0), nrow=n)
+    S <- V0 + Z
     SU <- t(apply(S, 1, function(x) proj.tconv(x, V_matrix)))
     if (any(!(apply(SU, 1, is_M_ultrametric, C_matrix=C_matrix)))) stop("BAD PROJECTION")
-    x_opt <- max_w_min(K, SU, C_matrix)
+    w <- max_w_min(K, SU, C_matrix)
+    sigma_s <- sigma_s*0.97
   }
-  # Some potentially useful stats.
-  SU_K <- t(apply(SU, 1, function(x) recover_K(x)$Nested)) # Distribution of cones for sample.
-  SU_inK <- length(which(SU_K[,k0] %==% 1)) # How many were in K?
-  SU_meanK <- mean(SU_K[,k0])
-  tw_min <- w_min_C(x_opt, C_matrix)
-  FWU_inK_maxWmin <- x_opt
-  return(list(S=SU, S_inK=SU_inK, S_meanK=SU_meanK, 
-    FWU_inK=FWU_inK_maxWmin, tw_min=tw_min))
+  w_min <- w_min_C(w, C_matrix)
+  return(list(S=SU, w=w, w_min=w_min))
 }
 
 #### Example 1 ####
@@ -85,25 +79,22 @@ v2_prime_proj == S[2,] # Is it equal?
 num_samples <- 1000
 sample_size <- 25
 
+# Sample indices of cones in Nested Set fan.
 K_x <- sample(seq_len(length(K_NS)), num_samples, replace = TRUE)
+# Generate points in those cones.
 X <- t(sapply(K_x, function(k) sample_cone(K_NS[[k]])))
 
 S_x <- list()
-S_n_inK <- c()
-S_avg_inK <- c()
-fwu_inK <- list()
-tw_min <- c()
+w_mat <- matrix(0, nrow=num_samples, ncol=length(E_set))
+w_min_vec <- c()
 for (i in 1:num_samples){
-  xi <- as.numeric(X[i,])
-  ki <- K_x[[i]]
-  find_sample <- S_int_K(x0=xi, k0=ki, n=sample_size, dispersion=3)
-  S_x[[length(S_x)+1]] <- find_sample$S
-  S_n_inK <- c(S_n_inK, find_sample$S_inK)
-  S_avg_inK <- c(S_avg_inK, find_sample$S_meanK)
-  fwu_inK[[length(fwu_inK)+1]] <- find_sample$FWU_inK
-  tw_min <- c(tw_min, find_sample$tw_min)
+  v0 <- as.numeric(X[i,])
+  K <- K_NS[[K_x[i]]]
+  Sample.from.U_M <- Generate.Sample.from.U_M(v0, K, sample_size, sigma_s=3)
+  S_x[[length(S_x)+1]] <- Sample.from.U_M$S
+  w_mat[i,] <- Sample.from.U_M$w
+  w_min_vec <- c(w_min_vec, Sample.from.U_M$w_min)
   print(paste0(i,"/", num_samples, " Samples Generated"))
 }
-print(paste0("Avg S in K: ", round(mean(S_avg_inK),3), "; Range of tw_min: ", paste0(round(min_max(tw_min),4), collapse=" - "),3))
 
-save(K_x, X=X, S_x, S_n_inK, S_avg_inK, fwu_inK, tw_min, file = "Data/RandomK_1000_25.rda")
+save(K_x, X=X, S_x, w_mat, w_min_vec, file = "Data/M(Running)_S1000_N25.rda")
